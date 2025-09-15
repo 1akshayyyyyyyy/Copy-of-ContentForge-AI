@@ -1,0 +1,5 @@
+{
+  "name": "Copy of ContentForge AI",
+  "description": "An AI agent that collects content from various sources (YouTube, Reddit, News), analyzes it, and prepares Medium-ready blog post drafts with SEO optimizations, summaries, and more.",
+  "requestFramePermissions": []
+}
