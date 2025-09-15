@@ -22,17 +22,15 @@ export default async function handler(
     }
 
     try {
-        const response = await ai.getGenerativeModel({model: 'imagen-3.0-generate-001'}).generateContent({
-            contents: [{role: "user", parts: [{text: prompt}]}],
-            generationConfig: {
-                responseMimeType: 'image/jpeg',
-            }
+        const response = await ai.getGenerativeModel({ model: 'imagen-4.0-generate-001' }).generateImages({
+            prompt: prompt,
+            numberOfImages: 1,
+            responseMimeType: 'image/jpeg',
+            aspectRatio: '16:9',
         });
 
-        // @ts-ignore
-        if (response.response.candidates && response.response.candidates.length > 0) {
-            // @ts-ignore
-            const base64ImageBytes: string = response.response.candidates[0].content.parts[0].fileData.fileUri;
+        if (response.generatedImages && response.generatedImages.length > 0) {
+            const base64ImageBytes: string = response.generatedImages[0].image.imageBytes;
             const imageUrl = `data:image/jpeg;base64,${base64ImageBytes}`;
             return res.status(200).json({ imageUrl });
         }
