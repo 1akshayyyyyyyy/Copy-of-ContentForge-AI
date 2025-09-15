@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import type { ProcessedItem } from '../types';
-import { generateImage } from '../services/geminiService';
 import { ImageIcon } from './icons/ImageIcon';
 import { LoadingSpinner } from './LoadingSpinner';
 
@@ -103,7 +102,22 @@ const ImageGenerator: React.FC<{ item: ProcessedItem; onUpdateItem: (item: Proce
         setGeneratedImage(null);
         try {
             const fullPrompt = `${prompt}, in the style of ${styles[selectedStyle]}.`;
-            const imageUrl = await generateImage(fullPrompt);
+            // const imageUrl = await generateImage(fullPrompt);
+            const response = await fetch('/api/image', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ prompt: fullPrompt }),
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || 'Something went wrong');
+            }
+
+            const { imageUrl } = await response.json();
+
             setGeneratedImage(imageUrl);
         } catch (e) {
             setError(e instanceof Error ? e.message : 'An unknown error occurred during image generation.');
