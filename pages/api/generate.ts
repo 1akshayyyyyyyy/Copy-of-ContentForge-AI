@@ -1,11 +1,24 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import type { RawContentItem, AnalyzedData, GroundingChunk } from '../types';
+import type { NextApiRequest, NextApiResponse } from 'next';
+import type { RawContentItem, AnalyzedData, GroundingChunk, ProcessedItem, RunReport } from '../../types';
 
-if (!process.env.API_KEY) {
-    throw new Error("API_KEY environment variable is not set");
+if (!process.env.GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY environment variable is not set");
 }
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+const ai = new GoogleGenAI(process.env.GEMINI_API_KEY);
+
+// Basic hashing function for deduplication. Not cryptographically secure.
+const createHash = (input: string): string => {
+    let hash = 0;
+    for (let i = 0; i < input.length; i++) {
+        const char = input.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash |= 0; // Convert to 32bit integer
+    }
+    return hash.toString();
+};
+
 
 const analysisSchema = {
     type: Type.OBJECT,
@@ -36,8 +49,8 @@ const analysisSchema = {
     required: ["keywords", "seoTitles", "tags", "summaries", "sentiment", "readingTimeMinutes", "thumbnail"]
 };
 
-
-export const generateContent = async (topic: string, count: number): Promise<{ content: RawContentItem[], groundingChunks: GroundingChunk[] }> => {
+const generateContent = async (topic: string, count: number): Promise<{ content: RawContentItem[], groundingChunks: GroundingChunk[] }> => {
+    // ... (rest of the function is the same as in geminiService.ts)
     try {
         const prompt = `
         You are an expert research assistant. Your task is to find real, trending content from the web about a specific topic.
@@ -79,15 +92,12 @@ export const generateContent = async (topic: string, count: number): Promise<{ c
         ]
         `;
 
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: prompt,
-            config: {
-                tools: [{googleSearch: {}}],
-            }
+        const response = await ai.getGenerativeModel({model: 'gemini-1.5-flash'}).generateContent({
+            contents: [{role: "user", parts: [{text: prompt}]}],
+            tools: [{googleSearch: {}}],
         });
 
-        const jsonString = response.text.trim();
+        const jsonString = response.response.text().trim();
         const jsonMatch = jsonString.match(/```json\n([\s\S]*?)\n```/);
         const parsableString = jsonMatch ? jsonMatch[1] : jsonString;
 
@@ -103,7 +113,7 @@ export const generateContent = async (topic: string, count: number): Promise<{ c
             throw new Error("The AI returned a response that was not valid JSON. Please try again.");
         }
         
-        const groundingChunks = (response.candidates?.[0]?.groundingMetadata?.groundingChunks as GroundingChunk[]) || [];
+        const groundingChunks = (response.response.candidates?.[0]?.groundingMetadata?.groundingAttributions as GroundingChunk[]) || [];
 
         return { content, groundingChunks };
 
@@ -116,7 +126,8 @@ export const generateContent = async (topic: string, count: number): Promise<{ c
     }
 };
 
-export const analyzeContent = async (item: RawContentItem): Promise<AnalyzedData> => {
+const analyzeContent = async (item: RawContentItem): Promise<AnalyzedData> => {
+    // ... (rest of the function is the same as in geminiService.ts)
     try {
         const wpm = 200;
         const wordCount = item.fullText.split(/\s+/).length;
@@ -131,16 +142,16 @@ export const analyzeContent = async (item: RawContentItem): Promise<AnalyzedData
         
         Generate all required fields according to the provided JSON schema.`;
         
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: prompt,
-            config: {
+        const response = await ai.getGenerativeModel({model: 'gemini-1.5-flash'}).generateContent({
+            contents: [{role: "user", parts: [{text: prompt}]}],
+            generationConfig: {
                 responseMimeType: 'application/json',
-                responseSchema: analysisSchema,
-            }
+            },
+            // @ts-ignore
+            tools: [{functionDeclarations: [analysisSchema]}]
         });
 
-        const jsonString = response.text;
+        const jsonString = response.response.text();
         const result = JSON.parse(jsonString);
         // Ensure reading time is what we calculated
         result.readingTimeMinutes = readingTime;
@@ -151,10 +162,8 @@ export const analyzeContent = async (item: RawContentItem): Promise<AnalyzedData
     }
 };
 
-
-// Fix: The function is called before the full `ProcessedItem` is created.
-// It only requires the data from `RawContentItem` and `AnalyzedData`.
-export const generateMarkdown = async (item: RawContentItem & AnalyzedData): Promise<string> => {
+const generateMarkdown = async (item: RawContentItem & AnalyzedData): Promise<string> => {
+    // ... (rest of the function is the same as in geminiService.ts)
     try {
         const prompt = `
         You are a blog post writer for Medium. Using the following JSON data, create a Medium-ready Markdown draft.
@@ -185,39 +194,86 @@ export const generateMarkdown = async (item: RawContentItem & AnalyzedData): Pro
         8. The output must be a single block of valid Markdown.
         `;
 
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: prompt
-        });
+        const response = await ai.getGenerativeModel({model: 'gemini-1.5-flash'}).generateContent(prompt);
 
-        return response.text;
+        return response.response.text();
     } catch (error) {
         console.error("Error generating markdown:", error);
         throw new Error("Failed to generate markdown with AI model.");
     }
 };
 
-export const generateImage = async (prompt: string): Promise<string> => {
+export default async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse
+) {
+    if (req.method !== 'POST') {
+        return res.status(405).json({ error: 'Method Not Allowed' });
+    }
+
+    const { topic, count } = req.body;
+
+    if (!topic || !count) {
+        return res.status(400).json({ error: 'Missing topic or count' });
+    }
+
+    const report: RunReport = {
+        totalItemsFetched: 0,
+        itemsPerSource: {},
+        duplicatesFound: 0,
+        errors: [],
+        warnings: [],
+        groundingChunks: []
+    };
+    const seenHashes = new Set<string>();
+
     try {
-        const response = await ai.models.generateImages({
-            model: 'imagen-4.0-generate-001',
-            prompt: prompt,
-            config: {
-                numberOfImages: 1,
-                outputMimeType: 'image/jpeg',
-                aspectRatio: '16:9',
-            },
+        const { content: rawContent, groundingChunks } = await generateContent(topic, count);
+        report.totalItemsFetched = rawContent.length;
+        report.groundingChunks = groundingChunks;
+
+        rawContent.forEach(item => {
+            report.itemsPerSource[item.source] = (report.itemsPerSource[item.source] || 0) + 1;
         });
 
-        if (response.generatedImages && response.generatedImages.length > 0) {
-            const base64ImageBytes: string = response.generatedImages[0].image.imageBytes;
-            return `data:image/jpeg;base64,${base64ImageBytes}`;
+        const processedItems: ProcessedItem[] = [];
+
+        for (let i = 0; i < rawContent.length; i++) {
+            const item = rawContent[i];
+            try {
+                const analysis = await analyzeContent(item);
+
+                const hash = createHash(`${item.title}${analysis.summaries.medium}${item.source}`);
+                const isDuplicate = seenHashes.has(hash);
+                if (isDuplicate) {
+                    report.duplicatesFound++;
+                } else {
+                    seenHashes.add(hash);
+                }
+
+                const markdown = await generateMarkdown({ ...item, ...analysis });
+
+                processedItems.push({
+                    ...item,
+                    ...analysis,
+                    id: `${item.source}-${i}`,
+                    markdown,
+                    isDuplicate,
+                    createdAt: new Date().toISOString(),
+                });
+            } catch (e) {
+                const errorMessage = `Failed to process item: ${item.title}. Reason: ${e instanceof Error ? e.message : 'Unknown error'}`;
+                console.error(errorMessage, e);
+                report.errors.push(errorMessage);
+            }
         }
         
-        throw new Error("No image was generated by the model.");
+        res.status(200).json({ processedItems, report });
 
-    } catch (error) {
-        console.error("Error generating image:", error);
-        throw new Error("Failed to generate image with AI model.");
+    } catch (e) {
+        const errorMessage = e instanceof Error ? e.message : 'An unknown error occurred';
+        console.error('Generation process failed:', e);
+        report.errors.push(errorMessage);
+        res.status(500).json({ error: errorMessage, report });
     }
-};
+}
